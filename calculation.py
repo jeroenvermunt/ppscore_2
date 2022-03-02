@@ -5,6 +5,9 @@ from sklearn import tree
 from sklearn import preprocessing
 from sklearn.model_selection import cross_val_score
 from sklearn.metrics import mean_absolute_error, f1_score
+from sklearn.model_selection import GroupKFold
+from functools import partial
+import sklearn
 
 import pandas as pd
 from pandas.api.types import (
@@ -17,9 +20,29 @@ from pandas.api.types import (
     is_timedelta64_dtype,
 )
 
-
 NOT_SUPPORTED_ANYMORE = "NOT_SUPPORTED_ANYMORE"
 TO_BE_CALCULATED = -1
+
+def cross_val_scores_weighted(model, X, y, weights, cv, groups, scoring): # metrics=[sklearn.metrics.accuracy_score]
+
+    if scoring == 'f1_weighted':
+        metric = f1_score
+        metric = partial(metric,average='weighted')
+    elif scoring == 'neg_mean_absolute_error':
+        metric = mean_absolute_error
+
+    kf = GroupKFold(n_splits=cv)
+    for train_index, test_index in kf.split(X, y, groups):
+        model_clone = sklearn.base.clone(model)
+        X_train, X_test = X[train_index], X[test_index]
+        y_train, y_test = y[train_index], y[test_index]
+        weights_train, weights_test = weights[train_index], weights[test_index]
+        model_clone.fit(X_train,y_train,sample_weight=weights_train)
+        y_pred = model_clone.predict(X_test)
+        # for i, metric in enumerate(metrics):
+        scores = metric(y_true=y_test, y_pred=y_pred, sample_weight = weights_test)
+        # scores[i].append(score)
+    return scores
 
 
 def _calculate_model_cv_score_(
@@ -62,11 +85,22 @@ def _calculate_model_cv_score_(
 
     # Cross-validation is stratifiedKFold for classification, KFold for regression
     # CV on one core (n_job=1; default) has shown to be fastest
-    scores = cross_val_score(
-        model, feature_input, target_series.to_numpy(), cv=cross_validation, scoring=metric
-    )
+    if 'sample_weights' in kwargs:
+        scores = cross_val_scores_weighted(
+            model,
+            feature_input,
+            target_series.to_numpy(),
+            weights=kwargs['sample_weights'],
+            cv=cross_validation,
+            groups=df['index'],
+            scoring=metric
+        )
+    else:
+        scores = cross_val_score(
+            model, feature_input, target_series.to_numpy(), cv=cross_validation, scoring=metric
+        )
+    return np.mean(scores)
 
-    return scores.mean()
 
 def _calculate_model_cv_score_2_(
     df, target, feature1, feature2, task, cross_validation, random_seed, **kwargs
@@ -117,11 +151,20 @@ def _calculate_model_cv_score_2_(
 
     # Cross-validation is stratifiedKFold for classification, KFold for regression
     # CV on one core (n_job=1; default) has shown to be fastest
-    scores = cross_val_score(
-        model, feature_input, target_series.to_numpy(), cv=cross_validation, scoring=metric
-    )
-
-    return scores.mean()
+    if 'sample_weights' in kwargs:
+        scores = cross_val_scores_weighted(
+            model,
+            feature_input.todok(),
+            target_series.to_numpy(),
+            cv=cross_validation,
+            groups=df['index'],
+            scoring=metric
+        )
+    else:
+        scores = cross_val_score(
+            model, feature_input, target_series.to_numpy(), cv=cross_validation, scoring=metric
+        )
+    return np.mean(scores)
 
 
 def _normalized_mae_score(model_mae, naive_mae):
@@ -268,7 +311,7 @@ def _determine_case_and_prepare_df(df, x, y, sample=5_000, random_seed=123):
     if x == y: # critical
         return df, "predict_itself"
 
-    df = df[[x, y]] # critical
+    df = df[[x, y, 'index']] # critical # TODO: replace index with group feature
     # IDEA: log.warning when values have been dropped
     df = df.dropna()
 
@@ -318,7 +361,10 @@ def _determine_case_and_prepare_df_2(df, x1, x2, y, sample=5_000, random_seed=12
         if x == y: # critical
             return df, "predict_itself"
 
-    df = df[[x1, x2, y]] # critical
+    if 'index' in [x1, x2]:
+        return df, 'feature_is_id' # TODO: make sure this does not occur
+
+    df = df[[x1, x2, y, 'index']] # critical
     # IDEA: log.warning when values have been dropped
     df = df.dropna()
 
@@ -407,7 +453,7 @@ def _is_column_in_df(column, df):
 
 
 def _score(
-    df, x, y, task, sample, cross_validation, random_seed, invalid_score, catch_errors
+    df, x, y, task, sample, cross_validation, random_seed, invalid_score, catch_errors, **kwargs
 ): # critical
     df, case_type = _determine_case_and_prepare_df( # critical
         df, x, y, sample=sample, random_seed=random_seed
@@ -447,7 +493,7 @@ def _score(
 
 
 def _score_2(
-    df, x1, x2, y, task, sample, cross_validation, random_seed, invalid_score, catch_errors
+    df, x1, x2, y, task, sample, cross_validation, random_seed, invalid_score, catch_errors, **kwargs
 ):
     df, case_type = _determine_case_and_prepare_df_2(
         df, x1, x2, y, sample=sample, random_seed=random_seed
@@ -497,6 +543,7 @@ def score(
     random_seed=123,
     invalid_score=0,
     catch_errors=True,
+    **kwargs
 ):
     """
     Calculate the Predictive Power Score (PPS) for "x predicts y"
@@ -579,6 +626,7 @@ def score(
         )
     except Exception as exception:
         if catch_errors:
+            print(f'Error for feature: {x}')
             case_type = "unknown_error"
             task = _get_task(case_type, invalid_score)
             return {
@@ -606,6 +654,7 @@ def score_2(
     random_seed=123,
     invalid_score=0,
     catch_errors=True,
+    **kwargs
 ):
     """
     Calculate the Predictive Power Score (PPS) for "x predicts y"
@@ -649,7 +698,6 @@ def score_2(
             f"The 'df' argument should be a pandas.DataFrame but you passed a {type(df)}\nPlease convert your input to a pandas.DataFrame"
         )
  
-
     for x in [x1,x2]:
         if not _is_column_in_df(x, df):
             raise ValueError(
@@ -691,9 +739,11 @@ def score_2(
             random_seed,
             invalid_score,
             catch_errors,
+            **kwargs
         )
     except Exception as exception:
         if catch_errors:
+            print(f'Error for features {x1, x2}')
             case_type = "unknown_error"
             task = _get_task(case_type, invalid_score)
             return {
@@ -897,14 +947,20 @@ def predictors_2(df, y, output="df", sorted=True, verbose=True, **kwargs):
 
     # now calculates the scores of all combinations
     scores_matrix = [[[] for j in range(len(df.columns))] for i in range(len(df.columns))] 
+
+    
     for i, column1 in enumerate(columns):
 
         if verbose:
             print(f'{i+1}/{len(columns)}',end='/r')
 
         for j, column2 in enumerate(columns):
+
+            if j <= i:
+                continue
+
             if column1 != column2:
-                scores_matrix[i][j] = score_2(df, column1, column2, y, **kwargs, catch_errors=False) 
+                scores_matrix[i][j] = score_2(df, column1, column2, y, **kwargs) 
                 scores_matrix[i][j]['x1_score'] = scores[i]['ppscore']
                 scores_matrix[i][j]['x2_score'] = scores[j]['ppscore']
 
