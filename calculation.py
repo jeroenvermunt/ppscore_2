@@ -1,3 +1,4 @@
+from time import perf_counter
 import numpy as np
 import scipy
 
@@ -85,6 +86,7 @@ def _calculate_model_cv_score_(
 
     # Cross-validation is stratifiedKFold for classification, KFold for regression
     # CV on one core (n_job=1; default) has shown to be fastest
+
     if 'sample_weights' in kwargs:
         scores = cross_val_scores_weighted(
             model,
@@ -145,7 +147,7 @@ def _calculate_model_cv_score_2_(
             feature_input.append(array.reshape(-1, 1)) # critical
 
     if sparse_input:
-        feature_input = scipy.sparse.hstack((feature_input[0], feature_input[1]))
+        feature_input = scipy.sparse.hstack((feature_input[0], feature_input[1])).todok()
     else:
         feature_input = np.hstack((feature_input[0], feature_input[1]))
 
@@ -154,8 +156,9 @@ def _calculate_model_cv_score_2_(
     if 'sample_weights' in kwargs:
         scores = cross_val_scores_weighted(
             model,
-            feature_input.todok(),
+            feature_input,
             target_series.to_numpy(),
+            weights=kwargs['sample_weights'],
             cv=cross_validation,
             groups=df['index'],
             scoring=metric
@@ -310,6 +313,9 @@ def _determine_case_and_prepare_df(df, x, y, sample=5_000, random_seed=123):
     "Returns str with the name of the determined case based on the columns x and y"
     if x == y: # critical
         return df, "predict_itself"
+
+    if x == 'index':
+        return df, 'feature_is_id'
 
     df = df[[x, y, 'index']] # critical # TODO: replace index with group feature
     # IDEA: log.warning when values have been dropped
@@ -509,6 +515,7 @@ def _score_2(
             task=task,
             cross_validation=cross_validation,
             random_seed=random_seed,
+            **kwargs
         )
         # IDEA: the baseline_scores do sometimes change significantly, e.g. for F1 and thus change the PPS
         # we might want to calculate the baseline_score 10 times and use the mean in order to have less variance
@@ -948,11 +955,14 @@ def predictors_2(df, y, output="df", sorted=True, verbose=True, **kwargs):
     # now calculates the scores of all combinations
     scores_matrix = [[[] for j in range(len(df.columns))] for i in range(len(df.columns))] 
 
-    
+    timer = perf_counter()
+
     for i, column1 in enumerate(columns):
 
         if verbose:
-            print(f'{i+1}/{len(columns)}',end='/r')
+            print(f'''
+            {i+1}/{len(columns)}
+            {timer - (timer := perf_counter())}''')#,end='\r')
 
         for j, column2 in enumerate(columns):
 
